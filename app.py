@@ -17,9 +17,6 @@ app.config["SESSION_PERMANENT"] = False
 app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
 
-# Configure CS50 Library to use SQLite database
-# db = SQL("sqlite:///mytube.db")
-
 # Configure mySQL to the APP
 conn = mysql.connector.connect(host='localhost', password='a4867787', user='root', database="mytube")
 db = conn.cursor()
@@ -55,10 +52,11 @@ def index():
 
         # Write submitted form to playlists database
         db.execute("INSERT INTO playlists (title, user_id) VALUES (%s, %s)", (title, session['user_id']))
+        conn.commit()
 
         # Select the newest playlist_id created to update video url and image name
-        playlist_id = db.execute("SELECT playlist_id FROM playlists ORDER BY created_at DESC LIMIT 1;")[0][
-            'playlist_id']
+        db.execute("SELECT playlist_id FROM playlists ORDER BY created_at DESC LIMIT 1")
+        playlist_id = db.fetchone()[0]
 
         # insert playlist videos to database
         for vlink, vtitle in zip(videos, video_title):
@@ -75,16 +73,25 @@ def index():
             image.save(file_path)
 
             # update image name to database
-            db.execute("UPDATE playlists SET image = %s WHERE playlist_id = %s", f'{playlist_id}.jpg', playlist_id)
-            # cursor.execute("INSERT INTO playlists (title, user_id) VALUES (%s, %s)", (title, user_id))
-            # conn.commit()
+            db.execute("UPDATE playlists SET image = %s WHERE playlist_id = %s", (f'{playlist_id}.jpg', playlist_id))
+            conn.commit()
 
         return redirect("/")
-
-        # return render_template("test.html", url=url, title=title, videos=videos, video_title=video_title)
     else:
 
-        playlists = db.execute("SELECT * FROM playlists WHERE user_id = %s", session['user_id'])
+        db.execute("SELECT * FROM playlists WHERE user_id = %s", (session['user_id'],))
+        raw_playlists = db.fetchall()
+
+        playlists = [
+            {
+                'playlist_id': item[0],
+                'title': item[1],
+                'user_id': item[2],
+                'image': item[3],
+                'created_at': item[4].strftime('%Y-%m-%d %H:%M:%S')
+            }
+            for item in raw_playlists
+        ]
 
         return render_template("index.html", playlists=playlists)
 
@@ -108,14 +115,17 @@ def login():
             return apology("must provide password", 403)
 
         # Query database for username
-        rows = db.execute("SELECT * FROM users WHERE username = %s", request.form.get("username"))
+        db.execute("SELECT * FROM users WHERE username = %s", (request.form.get("username"),))
+        rows = db.fetchone()
+        if rows is None:
+            return apology("invalid username", 403)
 
         # Ensure username exists and password is correct
-        if len(rows) != 1 or not check_password_hash(rows[0]["hash"], request.form.get("password")):
-            return apology("invalid username and/or password", 403)
+        if not check_password_hash(rows[2], request.form.get("password")):
+            return apology("invalid password", 403)
 
         # Remember which user has logged in
-        session["user_id"] = rows[0]["id"]
+        session["user_id"] = rows[0]
 
         # Redirect user to home page
         return redirect("/")
@@ -137,22 +147,25 @@ def register():
             return apology("must provide username", 400)
 
         # Ensure the username already exists/not
-        elif db.execute("SELECT username FROM users WHERE username = %s", userName):
+        db.execute("SELECT username FROM users WHERE username = %s", (userName,))
+        if db.fetchone():
             return apology("username already exist", 400)
 
         # Ensure password was submitted
-        elif not userPassword:
+        if not userPassword:
             return apology("must provide password", 400)
 
         # # Ensure confrimation was submitted
-        elif not userConfirmation:
+        if not userConfirmation:
             return apology("must provide confirmation password", 400)
 
         # Ensure password and confirmation password match
-        elif userPassword != userConfirmation:
+        if userPassword != userConfirmation:
             return apology("passwords do not match", 400)
 
-        db.execute("INSERT INTO users (username, hash) VALUES (%s, %s)", userName, generate_password_hash(userPassword))
+        db.execute("INSERT INTO users (username, hash) VALUES (%s, %s)",
+                   (userName, generate_password_hash(userPassword)))
+        conn.commit()
 
         return redirect("/")
 
@@ -178,11 +191,19 @@ def playlist():
     playlist_id = request.args.get('playlist_id')
     playlist_id = int(playlist_id)
 
-    videos = db.execute("SELECT * FROM videos WHERE playlist_id = %s", playlist_id)
+    db.execute("SELECT * FROM videos WHERE playlist_id = %s", (playlist_id,))
+    raw_videos = db.fetchall()
 
-    playlists = db.execute("SELECT * FROM playlists WHERE user_id = %s", session['user_id'])
+    videos = [
+        {
+            'url': item[0],
+            'video_title': item[1],
+            'playlist_id': item[2]
+        }
+        for item in raw_videos
+    ]
 
-    return render_template("playlist.html", videos=videos, playlists=playlists)
+    return render_template("playlist.html", videos=videos)
 
 
 @app.route("/remove")
@@ -190,15 +211,21 @@ def playlist():
 def remove():
     playlist_id = request.args.get('playlist_id')
     playlist_id = int(playlist_id)
+    print(playlist_id)
 
-    image = db.execute("SELECT image FROM playlists WHERE playlist_id = %s", playlist_id)[0]['image']
+    db.execute("SELECT image FROM playlists WHERE playlist_id = %s", (playlist_id,))
+    image = db.fetchone()
+    print(image)
     image_path = f"static/playlist/{image}"
 
     if os.path.exists(image_path):
         os.remove(image_path)
 
-    db.execute("DELETE FROM playlists WHERE playlist_id = %s", playlist_id)
-    db.execute("DELETE FROM videos WHERE playlist_id = %s", playlist_id)
+    db.execute("DELETE FROM playlists WHERE playlist_id = %s", (playlist_id,))
+    conn.commit()
+
+    db.execute("DELETE FROM videos WHERE playlist_id = %s", (playlist_id,))
+    conn.commit()
 
     return redirect("/")
 
@@ -209,9 +236,24 @@ def settings():
     """
     account settings menu
     """
-    user_name = db.execute("SELECT username FROM users WHERE id = %s", session['user_id'])
+    db.execute("SELECT username FROM users WHERE id = %s", (session['user_id'],))
+    user_name = db.fetchone()[0]
+    print(session['user_id'])
+    print(user_name)
 
-    playlists = db.execute("SELECT * FROM playlists WHERE user_id = %s", session['user_id'])
+    db.execute("SELECT * FROM playlists WHERE user_id = %s", (session['user_id'],))
+    raw_playlists = db.fetchall()
+
+    playlists = [
+        {
+            'playlist_id': item[0],
+            'title': item[1],
+            'user_id': item[2],
+            'image': item[3],
+            'created_at': item[4].strftime('%Y-%m-%d %H:%M:%S')
+        }
+        for item in raw_playlists
+    ]
 
     return render_template("settings.html", user_name=user_name, playlists=playlists)
 
@@ -225,7 +267,13 @@ def change_usrname():
         if not userName:
             return apology("Must provide new username", 401)
 
-        db.execute("UPDATE users SET username = %s WHERE id = %s", userName, session["user_id"])
+        # Ensure the username already exists/not
+        db.execute("SELECT username FROM users WHERE username = %s", (userName,))
+        if db.fetchone():
+            return apology("username already exist", 400)
+
+        db.execute("UPDATE users SET username = %s WHERE id = %s", (userName, session["user_id"]))
+        conn.commit()
 
         return redirect("/settings")
 
@@ -235,26 +283,39 @@ def change_pwd():
     if request.method == "POST":
         new_pwd = request.form.get("new_pwd")
 
-        # Query database for username
-        rows = db.execute("SELECT hash FROM users WHERE id = %s", session["user_id"])
+        # # Query database for username
+        # db.execute("SELECT * FROM users WHERE username = %s", (request.form.get("username"),))
+        # rows = db.fetchone()
+        # if rows is None:
+        #     return apology("invalid username", 403)
+        #
+        # # Ensure username exists and password is correct
+        # if not check_password_hash(rows[2], request.form.get("password")):
+        #     return apology("invalid password", 403)
 
-        # Ensure username exists and password is correct
-        if len(rows) != 1 or not check_password_hash(rows[0]["hash"], request.form.get("old_pwd")):
+        # Query database for username
+        db.execute("SELECT hash FROM users WHERE id = %s", (session["user_id"],))
+        rows = db.fetchone()
+        print(rows)
+
+        # Ensure password is correct
+        if not check_password_hash(rows[0], request.form.get("old_pwd")):
             return apology("Invalid password")
 
         # Ensure password was submitted
-        elif not new_pwd:
+        if not new_pwd:
             return apology("must provide new password", 400)
 
         # Ensure confrimation was submitted
-        elif not request.form.get("confirmation"):
+        if not request.form.get("confirmation"):
             return apology("must provide confirmation password", 400)
 
         # Ensure passwords was match
-        elif request.form.get("confirmation") != new_pwd:
+        if request.form.get("confirmation") != new_pwd:
             return apology("Passwords do not match", 400)
 
-        db.execute("UPDATE users SET hash = %s WHERE id = %s", generate_password_hash(new_pwd), session["user_id"])
+        db.execute("UPDATE users SET hash = %s WHERE id = %s", (generate_password_hash(new_pwd), session["user_id"]))
+        conn.commit()
 
         return redirect("/settings")
 
